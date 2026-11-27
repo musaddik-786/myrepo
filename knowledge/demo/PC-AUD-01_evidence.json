@@ -1,0 +1,14 @@
+{
+  "_label": "SAMPLE DATA standing in for read-only PolicyCenter queries. Not from a real system.",
+  "unit_id": "PC-AUD-01",
+  "policy_number": "PC-0078231",
+  "audit_job": "AUD-100231",
+  "checks": [
+    {"id": "audit_form_basis", "description": "Audited payroll on the audit form", "query": "SELECT audited_payroll FROM audit_form WHERE job='AUD-100231'", "result": "440,000", "facts": {"audited_payroll": 440000}},
+    {"id": "exposure_basis", "description": "Audited basis stored on the GL exposure", "query": "SELECT audited_basis FROM gl_exposure_audit WHERE job='AUD-100231'", "result": "369,412", "facts": {"audited_basis": 369412}},
+    {"id": "direction_test", "description": "Higher audited basis must give higher premium", "query": "compare estimated 400,000 vs audited 440,000 against premium delta", "result": "FAIL: basis up 10%, premium delta -156", "facts": {"delta": -156}},
+    {"id": "recompute", "description": "Recompute (basis / 1000) x rate 5.10 for the audited payroll", "query": "(440000/1000) x 5.10", "result": "2,244 audited; billed 2,040; expected delta +204", "facts": {"expected_audited_premium": 2244, "billed_premium": 2040, "expected_delta": 204}},
+    {"id": "mid_term_changes", "description": "Mid-term class, location or limit changes", "query": "SELECT * FROM policy_change WHERE policy='PC-0078231'", "result": "None", "facts": {}},
+    {"id": "billing_hold", "description": "Audit invoice status in Billing", "query": "SELECT status FROM invoice WHERE job='AUD-100231'", "result": "Not sent", "facts": {}}
+  ]
+}

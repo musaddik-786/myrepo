@@ -1,0 +1,168 @@
+"""
+Orchestrator Agent's deterministic REST surface for the UI.
+
+Classify / Approve / Reject / Resolve ("Close ticket and save to
+knowledge") are plain, form-driven, single-tool actions -- there is
+nothing for an LLM to decide, so (matching the claims-solution reference
+project's own split: decideApproval/fetchPendingApprovals never go through
+its orchestrator's /chat either) they stay here as deterministic REST
+calls. But they now reach the REAL agent MCP server process over HTTP
+(port 7900 by default) instead of importing a handler function in-process
+-- a real process genuinely has to be running for these to work, the same
+as every other agent in this platform.
+
+Run L1/L2/L3 do NOT live here any more: those are exactly the "decide
+which tools, in what order" steps, so the UI now sends them straight to
+the real, standalone Orchestrator Agent process's /chat endpoint (port
+7021, via ui/vite.config.ts's "/orchestrator-agent" proxy) -- see
+agents/orchestrator/server.py. That agent persists each stage's result via
+its own orchestrator_state MCP tools, into the exact same fix_runs table
+load_run()/GET /api/orchestrator/{ticket_id} below reads -- so the UI just
+re-fetches from here after the chat call to display results.
+
+Same fix_runs/fix_audit_log persistence as app/routers/fix.py (its own
+load_run/audit helpers are imported here, not duplicated).
+"""
+from __future__ import annotations
+
+import os
+
+import httpx
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from app.routers.fix import (
+    RESOLUTION_TYPES,
+    STAGES,
+    DecisionRequest,
+    ResolveRequest,
+    audit,
+    load_run,
+    save_run,
+)
+
+MCP_BASE_URL = os.getenv("MCP_BASE_URL", "http://localhost:7900")
+
+router = APIRouter(prefix="/api/orchestrator")
+
+
+def _mcp_post(path: str, json: dict) -> dict:
+    try:
+        resp = httpx.post(f"{MCP_BASE_URL}{path}", json=json, timeout=60.0)
+    except httpx.RequestError as exc:
+        raise HTTPException(502, f"Could not reach the agent MCP server at {MCP_BASE_URL}: {exc}") from exc
+    if resp.status_code >= 400:
+        detail = resp.json().get("detail", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+        raise HTTPException(resp.status_code, detail)
+    return resp.json()
+
+
+@router.post("/classify/{record_id}")
+def orchestrator_classify(record_id: str) -> dict:
+    """Ticket Classification & Triage Agent, over HTTP to the real MCP server."""
+    return _mcp_post("/api/v1/ticket_classification_triage/api/ticket_classification_triage/classify", {"record_id": record_id})
+
+
+class SimilarIncidentRequest(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    module: str | None = None
+    severity: str | None = None
+    created: str | None = None
+
+
+@router.post("/similar/{ticket_id}")
+def orchestrator_similar(ticket_id: str, req: SimilarIncidentRequest) -> dict:
+    """
+    Similar Incident Retrieval Agent, over HTTP to the real MCP server.
+
+    Deliberately its own button/deterministic call, NOT routed through the
+    Orchestrator Agent's /chat (unlike the L1 guide, which also calls this
+    same tool as one of its own steps) -- the person can search for similar
+    tickets on demand, independent of running L1/L2/L3. The result is still
+    persisted into outputs.similar (same fix_runs row the Orchestrator
+    Agent's own L1 run writes to), so either path lights up the same
+    "Similar historical tickets" display.
+    """
+    result = _mcp_post("/api/v1/similar_incident_retrieval/api/similar_incident_retrieval/find", {
+        "id": ticket_id, "title": req.title, "description": req.description,
+        "module": req.module, "severity": req.severity, "created": req.created,
+    })
+    run = load_run(ticket_id)
+    run["outputs"]["similar"] = result
+    save_run(run)
+    audit(ticket_id, "similar_search", "", {"source": "manual"})
+    return result
+
+
+@router.get("/{ticket_id}")
+def get_run(ticket_id: str) -> dict:
+    return load_run(ticket_id)
+
+
+@router.get("/audit")
+def audit_trail(limit: int = 100) -> list[dict]:
+    from app.routers.fix import audit_trail as _fix_audit_trail
+    return _fix_audit_trail(limit)
+
+
+def _decide(ticket_id: str, req: DecisionRequest, approve: bool) -> dict:
+    run = load_run(ticket_id)
+    l3 = run["outputs"].get("l3")
+    if not l3:
+        raise HTTPException(409, "Nothing to decide: L3 has not run.")
+    if run["status"] in ("approved", "rejected", "closed"):
+        raise HTTPException(409, f"Already {run['status']}.")
+    if not req.approver.strip():
+        raise HTTPException(422, "Approver is required.")
+
+    decision = _mcp_post("/api/v1/human_approval/api/human_approval/decide", {
+        "approve": approve, "gosu": l3["gosu"], "guard_passed": l3["guard"]["passed"],
+        "run_by": run.get("run_by") or "", "approver": req.approver,
+        "change_id": req.change_id, "note": req.note,
+    })
+
+    run["status"] = decision["status"]
+    run["stage"] = run["status"]
+    run["outputs"]["decision"] = decision
+    save_run(run)
+    audit(ticket_id, run["status"], req.approver, decision)
+    return run
+
+
+@router.post("/{ticket_id}/approve")
+def orchestrator_approve(ticket_id: str, req: DecisionRequest) -> dict:
+    return _decide(ticket_id, req, True)
+
+
+@router.post("/{ticket_id}/reject")
+def orchestrator_reject(ticket_id: str, req: DecisionRequest) -> dict:
+    return _decide(ticket_id, req, False)
+
+
+@router.post("/{ticket_id}/resolve")
+def orchestrator_resolve(ticket_id: str, req: ResolveRequest) -> dict:
+    run = load_run(ticket_id)
+    if req.level not in STAGES or req.level not in run["outputs"]:
+        raise HTTPException(409, f"Run {req.level.upper()} before resolving with it.")
+    if run["status"] == "closed":
+        raise HTTPException(409, "Already closed.")
+    if req.resolution_type not in RESOLUTION_TYPES:
+        raise HTTPException(422, "Unknown resolution type.")
+    if not req.notes.strip() or not req.resolved_by.strip():
+        raise HTTPException(422, "Resolution notes and your name are required.")
+    if req.level == "l3" and run["status"] != "approved":
+        raise HTTPException(409, "The L3 fix must be approved before the ticket can be closed with it.")
+
+    stored = _mcp_post("/api/v1/knowledge_ingestion_curation/api/knowledge_ingestion_curation/ingest_closed_ticket", {
+        "ticket_id": ticket_id, "resolution_type": req.resolution_type, "notes": req.notes.strip(),
+    })
+
+    run["outputs"]["resolution"] = {
+        "level": req.level, "resolution_type": req.resolution_type,
+        "notes": req.notes.strip(), "resolved_by": req.resolved_by.strip(), **stored,
+    }
+    run["status"], run["stage"] = "closed", "closed"
+    save_run(run)
+    audit(ticket_id, "closed", req.resolved_by.strip(), run["outputs"]["resolution"])
+    return run

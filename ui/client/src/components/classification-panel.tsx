@@ -1,0 +1,101 @@
+import { useState } from "react";
+import { AlertTriangle, Loader2, Tag } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { classifyTicket } from "@/lib/api";
+import { classificationToTicketPatch, type ClassificationResult, type Ticket } from "@/lib/types";
+
+interface Props {
+  ticket: Ticket;
+  onClassified: (patch: Partial<Ticket> & { recordId: string }) => void;
+}
+
+function curationBadgeClass(status: string) {
+  switch (status) {
+    case "AutoApproved":
+    case "SMEApproved":
+      return "bg-success/10 text-success";
+    case "PendingReview":
+      return "bg-secondary text-secondary-foreground";
+    default:
+      return "bg-muted text-muted-foreground";
+  }
+}
+
+/** Ticket Classification & Triage Agent: tags/retags this ticket against the controlled
+* taxonomy (module/category/severity/resolution_type), same as backend/ingestion.py uses
+* for the batch knowledge pipeline. This is what clears "Needs Retag" on an osTicket-synced
+* ticket -- see app/routers/classify.py. */
+export function ClassificationPanel({ ticket, onClassified }: Props) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<ClassificationResult | null>(null);
+
+  const needsRetag = ticket.curationStatus === "NeedsRetag";
+
+  const run = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const r = await classifyTicket(ticket.recordId);
+      setResult(r);
+      onClassified(classificationToTicketPatch(r));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Something went wrong");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-[#0B2A4A]/5 px-5 py-3 text-[#0B2A4A]">
+        <div className="flex items-center gap-2 font-semibold">
+          <Tag className="h-4 w-4 text-primary" /> Classification &amp; Triage
+        </div>
+        {needsRetag && !result && (
+          <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
+            Needs Retag
+          </Badge>
+        )}
+      </div>
+
+      <div className="space-y-3 px-5 py-4 text-sm">
+        {error && (
+          <p className="flex items-center gap-2 text-destructive">
+            <AlertTriangle className="h-4 w-4" />
+            {error}
+          </p>
+        )}
+
+        <Button onClick={run} disabled={busy}>
+          {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+          {busy ? "Classifying…" : needsRetag ? "Classify ticket" : "Re-classify ticket"}
+        </Button>
+
+        {result && (
+          <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
+            <div>
+              <span className="font-medium">Summary: </span>
+              {result.summary}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="outline">{result.module}</Badge>
+              <Badge variant="outline">{result.category}</Badge>
+              <Badge variant="outline">
+                {result.severity}
+                {result.severity_source === "priority" ? " (from priority)" : " (model)"}
+              </Badge>
+              <Badge variant="outline">{result.resolution_type ?? "not recorded"}</Badge>
+              <Badge variant="outline">Confidence {(result.tagging_confidence * 100).toFixed(0)}%</Badge>
+              <Badge className={curationBadgeClass(result.curation_status)}>{result.curation_status}</Badge>
+            </div>
+            {result.tagging_reasoning && (
+              <p className="text-muted-foreground">{result.tagging_reasoning}</p>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}

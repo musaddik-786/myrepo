@@ -1,0 +1,40 @@
+{
+  "_label": "SAVED SAMPLE OUTPUT shown only when the AI service is unreachable.",
+  "l3": {
+    "gosu": "// Ticket {ticket_id}: PC-AUD-01 correct audited basis on policy PC-0078231\nuses gw.transaction.Transaction\n\nTransaction.runWithNewBundle(\\b -> {\n  var exposure = b.add(Audit.finder.findExposureAudit(\"PC-0078231\", \"AUD-100231\"))\n  exposure.AuditedBasis = 440000\n})",
+    "explanation": "The audit form says audited payroll is 440,000 but the exposure holds 369,412. The script sets the exposure to the audited figure so premium recomputes upward.",
+    "expected_effect": "Expected: audited premium 2,244 against 2,040 billed, so the audit delta becomes +204 instead of -156. Not executed.",
+    "requirement": {
+      "title": "Validate audited basis against the audit form before final audit completes",
+      "problem": "A final audit can complete with an exposure basis that differs from the audited payroll on the form, producing a wrong-direction premium.",
+      "root_cause": "The auditor keyed the exposure basis by hand; nothing compares it with the audit form total.",
+      "evidence": [
+        "Audit form payroll 440,000 vs exposure basis 369,412",
+        "Premium delta -156 where +204 was expected"
+      ],
+      "acceptance_criteria": [
+        "Final audit cannot complete if exposure basis differs from the form total by more than 0.5%",
+        "The direction test runs on every GL exposure at audit completion"
+      ],
+      "impacted_modules": [
+        "PolicyCenter Premium Audit",
+        "GL rating"
+      ],
+      "test_scenarios": [
+        "Basis up 10%, premium must rise",
+        "Basis equal to estimate, delta must be zero",
+        "Minimum premium applies, no false failure"
+      ],
+      "risk": "Low. Adds a validation at audit completion; existing completed audits are unaffected."
+    }
+  },
+  "l2": {
+    "conclusion": "The audited basis stored on the GL exposure (369,412) does not match the audit form (440,000), so premium recomputed in the wrong direction. Needs an L3 data fix.",
+    "needs_data_fix": true,
+    "confidence": "high",
+    "ok_false": [
+      "exposure_basis",
+      "direction_test"
+    ]
+  }
+}

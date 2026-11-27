@@ -1,0 +1,39 @@
+# secrets / env
+.env
+*.env
+!sample.env
+.env.*
+# python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+# node / ui build
+node_modules/
+ui/dist/
+*.tsbuildinfo
+*.local
+# os / tools
+.DS_Store
+.claude/worktrees/
+.env
+.env.*
+**/.env
+**/.env.*
+
+node_modules/
+
+__pycache__/
+*.pyc
+
+.vscode/
+
+token.pickle
+client_secret.json
+subscriber_sa.json
+
+credentials/
+ 
+ 
